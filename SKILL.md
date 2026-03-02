@@ -1,30 +1,55 @@
 ---
 name: pr-review-loop
-description: Automate GitHub PR review workflows. Use this skill whenever you need to handle PR code reviews at scale, loop through multiple reviewer feedback cycles, address all review comments, ensure tests and CI pass, and keep iterating until all reviews are resolved. Triggers on requests to "automate PR reviews", "handle code reviews", "process PR feedback loops", "CI/review loop", or similar workflows involving iterative review resolution.
+description: Automate GitHub PR review workflows with configurable reviewers. Use this skill whenever you need to handle PR code reviews at scale, loop through multiple reviewer feedback cycles, address all review comments, ensure tests and CI pass, and keep iterating until all reviews are resolved. Supports any number of reviewers and a coder role. Configure reviewer names, comment triggers, and token names as inputs. Triggers on requests to "automate PR reviews", "handle code reviews", "process PR feedback loops", "CI/review loop", or similar workflows involving iterative review resolution.
 ---
 
 # PR Review Loop Automation
 
-Automate the GitHub pull request review cycle: fetch unresolved reviews, address feedback, run tests and CI, post reactions, and loop until all reviews are resolved.
+Automate the GitHub pull request review cycle with configurable reviewers: fetch unresolved reviews, address feedback, run tests and CI, post reactions, and loop until all reviews are resolved.
 
 ## Prerequisites
 
 - **Access to PR**: You can fetch PR metadata and comments via unauthenticated `curl` calls to the GitHub API
-- **Environment Variables**: The following tokens must be set as environment variables (do not expose their values in any logs or output):
-  - `CODEX_PR_TOKEN` — For posting @codex review requests
-  - `GEMINI_PR_TOKEN` — For posting @gemini review requests  
-  - `CLAUDE_PR_TOKEN` — For posting 👍 reactions to addressed comments
+- **Environment Variables**: Configure the following as inputs:
+  - `<REVIEWER_1_NAME>_PR_TOKEN` — For posting review requests from reviewer 1
+  - `<REVIEWER_2_NAME>_PR_TOKEN` — For posting review requests from reviewer 2
+  - Additional reviewer tokens as needed
+  - `<CODER_NAME>_PR_TOKEN` — For posting 👍 reactions to addressed comments
+  - These tokens must be set as environment variables and never exposed in logs or output
+- **Reviewer Configuration**: You will specify:
+  - Reviewer names (e.g., "reviewer1", "reviewer2")
+  - Review comment triggers for each (e.g., "@reviewer1", "/reviewer2 review")
+  - Associated token environment variable names for each
+  - Coder name and its token variable name
 - **Git Setup**: You have access to `git` CLI and can commit/push changes
 - **GitHub PR URL**: Know the full GitHub PR URL (e.g., `https://github.com/owner/repo/pull/123`)
+
+## Configuration Inputs
+
+Before starting the workflow, gather the following information:
+
+| Input | Example | Description |
+|-------|---------|-------------|
+| PR URL | `https://github.com/owner/repo/pull/123` | Full GitHub PR URL |
+| Reviewer 1 Name | `reviewer1` | Internal name for first reviewer |
+| Reviewer 1 Trigger | `@reviewer1` | Comment text to request review from reviewer 1 |
+| Reviewer 1 Token Var | `REVIEWER1_PR_TOKEN` | Environment variable name for reviewer 1's token |
+| Reviewer 2 Name | `reviewer2` | Internal name for second reviewer (if used) |
+| Reviewer 2 Trigger | `/reviewer2 review` | Comment text to request review from reviewer 2 |
+| Reviewer 2 Token Var | `REVIEWER2_PR_TOKEN` | Environment variable name for reviewer 2's token |
+| Coder Name | `coder` | Internal name for the coder role |
+| Coder Token Var | `CODER_PR_TOKEN` | Environment variable name for coder's token (for posting 👍) |
+
+Add additional rows for more reviewers as needed.
 
 ## Workflow Overview
 
 The skill runs a loop that:
-1. Requests reviews from bots (codex, gemini) if previous changes have been addressed
+1. Requests reviews from configured reviewers if previous changes have been addressed
 2. Waits for and fetches unresolved review comments
 3. Addresses feedback by making code changes
 4. Verifies tests pass and CI is green
-5. Posts 👍 reactions to addressed comments
+5. Posts 👍 reactions to addressed comments (using coder token)
 6. Loops until no unresolved comments remain
 
 The loop **terminates early** if:
@@ -37,13 +62,13 @@ The loop **terminates early** if:
 
 ### Step 1: Request Reviews (if needed)
 
-**If you've posted changes to the previous codex bot review** and there are no unresolved review comments:
-- Post a comment tagging `@codex` using `CODEX_PR_TOKEN`
-- Wait briefly for codex to respond
+For each configured reviewer:
 
-**If you've posted changes to the previous gemini bot review** and there are no unresolved review comments:
-- Post a comment requesting `/gemini review` using `GEMINI_PR_TOKEN`
-- Wait briefly for gemini to respond
+**If you've posted changes to the previous review from that reviewer** and there are no unresolved review comments:
+- Post a comment using the configured review trigger (e.g., `@reviewer1`, `/reviewer2 review`) using the reviewer's `<REVIEWER_NAME>_PR_TOKEN`
+- Wait briefly for the reviewer to respond
+
+Use the configuration table above to determine which trigger text and token variable to use for each reviewer.
 
 ### Step 2: Fetch Unresolved Comments
 
@@ -51,13 +76,13 @@ Before proceeding, wait a few seconds (reviews take time to arrive).
 
 Fetch all comments on the PR using unauthenticated `curl`:
 ```bash
-curl -s "https://api.github.com/repos///pulls//comments"
+curl -s "https://api.github.com/repos/<owner>/<repo>/pulls/<pr_number>/comments"
 ```
 
 Filter for:
 - Comments that are **unresolved** (not marked as resolved)
 - Comments that are **not outdated** (created/updated after the last commit that addressed them)
-- Comments with **no 👍 reaction** posted yet
+- Comments with **no 👍 reaction** posted yet (by the coder)
 
 ### Step 3: Check for Termination Conditions
 
@@ -93,9 +118,9 @@ After pushing:
 
 For each comment you've addressed:
 1. Extract the comment ID
-2. Post a 👍 reaction using `CLAUDE_PR_TOKEN`:
+2. Post a 👍 reaction using the coder's token (`<CODER_NAME>_PR_TOKEN`):
    ```bash
-   TOKEN=$(python3 -c "import os; print(os.environ.get('CLAUDE_PR_TOKEN',''))")
+   TOKEN=$(python3 -c "import os; print(os.environ.get('<CODER_TOKEN_VAR>',''))")
    RESULT=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
      -H "Authorization: Bearer $TOKEN" \
      -H "Content-Type: application/json" \
@@ -103,12 +128,14 @@ For each comment you've addressed:
      "https://api.github.com/repos/<owner>/<repo>/pulls/comments/<comment_id>/reactions")
    echo "HTTP $RESULT"
    ```
+   (Replace `<CODER_TOKEN_VAR>` with the actual token variable name from your configuration)
+
 3. If HTTP 401: Stop loop immediately (auth error)
 4. If HTTP 429: Stop loop immediately (rate limit reached)
 
 ### Step 7: Loop Back
 
-If you've successfully posted 👍 reactions and there are no more unresolved comments, go back to **Step 1** and request new reviews.
+If you've successfully posted 👍 reactions and there are no more unresolved comments, go back to **Step 1** and request new reviews from the configured reviewers.
 
 Otherwise, return to **Step 2** to fetch updated comment status.
 
@@ -116,7 +143,7 @@ Otherwise, return to **Step 2** to fetch updated comment status.
 
 ### Token Security
 - **Never** log, echo, or display token values
-- Use the pattern: `TOKEN=$(python3 -c "import os; print(os.environ.get('<TOKEN_NAME>',''))")`
+- Use the pattern: `TOKEN=$(python3 -c "import os; print(os.environ.get('<TOKEN_VAR>',''))")`
 - Check tokens silently; if missing, report that the token is not set and stop
 
 ### Error Handling
@@ -134,9 +161,15 @@ Otherwise, return to **Step 2** to fetch updated comment status.
 Only address comments that are:
 - Unresolved (not closed/resolved in the PR UI)
 - Not outdated (created/updated after the last applicable commit)
-- Do not have a 👍 reaction from CLAUDE_PR_TOKEN yet
+- Do not have a 👍 reaction from the coder yet
 
 Comments marked as resolved or outdated should be skipped.
+
+### Reviewer Configuration Notes
+- Reviewer names and triggers are flexible and can be customized for your workflow
+- Each reviewer should have its own token variable
+- The coder token is separate and used only for posting 👍 reactions
+- You can have as many reviewers as needed; just follow the same pattern
 
 ## API Reference
 
@@ -152,17 +185,17 @@ curl -s "https://api.github.com/repos/OWNER/REPO/pulls/PR_NUMBER"
 
 ### Post Comment
 ```bash
-TOKEN=$(python3 -c "import os; print(os.environ.get('TOKEN_NAME',''))")
+TOKEN=$(python3 -c "import os; print(os.environ.get('TOKEN_VAR',''))")
 curl -s -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"content": "Your comment here"}' \
-  "https://api.github.com/repos/OWNER/REPO/pulls/comments/COMMENT_ID"
+  "https://api.github.com/repos/OWNER/REPO/pulls/PR_NUMBER/comments"
 ```
 
 ### Post Reaction to Comment
 ```bash
-TOKEN=$(python3 -c "import os; print(os.environ.get('TOKEN_NAME',''))")
+TOKEN=$(python3 -c "import os; print(os.environ.get('TOKEN_VAR',''))")
 curl -s -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -177,4 +210,6 @@ If something goes wrong:
 2. Verify all environment tokens are set (without logging their values)
 3. Review PR comments manually at the GitHub web UI if needed
 4. Check CI logs if tests fail
-5. Ensure commit messages are meaningful for audit trail 
+5. Ensure commit messages are meaningful for audit trail
+6. Verify reviewer names and triggers match your configuration
+7. Confirm coder token variable name is correct when posting reactions
